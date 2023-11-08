@@ -1,0 +1,629 @@
+///$tab Introduction
+/************************************************************************************************************************************
+	INFORMATION
+************************************************************************************************************************************
+	
+    Application: 			Horizontal Projects
+    Version:				0.2
+    Author:					Kurt Vannitsen
+    Date Created:			31-05-2023
+    Date Last modified:		19-06-2023
+    
+    Description:			
+
+/************************************************************************************************************************************/
+
+
+///$tab Application Settings
+/************************************************************************************************************************************
+	APPLICATION SETTINGS
+************************************************************************************************************************************/
+
+// SET Parameters
+SET ThousandSep								=',';
+SET DecimalSep								='.';
+SET MoneyThousandSep						=',';
+SET MoneyDecimalSep							='.';
+SET MoneyFormat								='€#,##0.00;-€#,##0.00';
+SET TimeFormat								='hh:mm:ss';
+SET DateFormat								='DD/MM/YYYY';
+SET TimestampFormat							='DD/MM/YYYY hh:mm:ss[.fff]';
+SET FirstWeekDay							=6;
+SET BrokenWeeks								=0;
+SET ReferenceDay							=4;
+SET FirstMonthOfYear						=1;
+SET CollationLocale							='en-IE';
+SET CreateSearchIndexOnReload				=1;
+SET MonthNames								='Jan;Feb;Mar;Apr;May;Jun;Jul;Aug;Sep;Oct;Nov;Dec';
+SET LongMonthNames							='January;February;March;April;May;June;July;August;September;October;November;December';
+SET DayNames								='Mon;Tue;Wed;Thu;Fri;Sat;Sun';
+SET LongDayNames							='Monday;Tuesday;Wednesday;Thursday;Friday;Saturday;Sunday';
+SET NumericalAbbreviation					='3:k;6:M;9:G;12:T;15:P;18:E;21:Z;24:Y;-3:m;-6:μ;-9:n;-12:p;-15:f;-18:a;-21:z;-24:y';
+
+// Disable Insights button
+SET Disable_Selection_Insights 				= 1 ; 
+
+
+// Environment Parameters:
+LET vEnvironment = ComputerName();
+Switch vEnvironment
+	// DEV
+	Case 'S-BIQSIDR8012'
+	SET vCaseURL = 'https://intragate.acceptance.ec.europa.eu/navigator/launch.jsp?caseNumber=';
+	
+	//Acc
+	Case 'S-BIQSIAC8004'
+	SET vCaseURL = 'https://intragate.acceptance.ec.europa.eu/navigator/launch.jsp?caseNumber=';
+	
+	//PRD
+	Case 'S-BIQSIPR8516'
+	SET vCaseURL = 'https://case.tech.ec.europa.eu/navigator/launch.jsp?caseNumber=';
+End Switch;
+
+///$tab Variables
+/************************************************************************************************************************************
+	VARIABLES
+************************************************************************************************************************************/
+///$tab Mapping Tables
+/************************************************************************************************************************************
+	MAPPING TABLES
+************************************************************************************************************************************/
+
+// Inline mapping table for Team Role Name mapping
+MAP_Team_Role:
+Mapping Load  * Inline [
+[ RoleName,		              RoleCode
+'Case Manager',               'CM', 
+'Case Handler',               'CH',
+'Case Assistant',             'CH',
+'Chief Economist',            'CE',
+'Hearing Officer',            'HO',
+'Others - Case Support',      'O-CS',
+'Others - Hearing Office',    'O-HO',
+'Others - Registry contact',  'O-RC',
+'Others – Chief Economist',   'O-CE',
+'Others – Expert',            'O-EP',
+'Others – Panel',             'O-PA',
+'Panel',                      'PA',
+'Registry contact',           'RC',
+'Remedies support',           'RS'
+];
+
+// Inline mapping table for Team Role sort Order
+MAP_Team_RoleSequence:
+Mapping Load  * Inline [
+[ RoleCode,		RoleSeq
+   CM,			     0
+   CH,			     1
+   CA,			     2
+   CE,			     3
+   HO,               4
+   O-CS,             5
+   O-HO,             6
+   O-RC,             7
+   O-CE,             8
+   O-EP,             9
+   O-PA,             10
+   PA,               11
+   RC,               12
+   RS,               13  
+];
+///$tab Data Mart
+/************************************************************************************************************************************
+	DATA MART
+************************************************************************************************************************************/
+
+// Connection COMP DataPlatform
+LIB CONNECT TO 'ACC - Data Connections:BOXI_DataPlatform';
+
+// Temporary table to split multi value dimensions linked to case
+Case_MultiValue_Temp:
+LOAD 
+	CASE_REFERENCE, 
+    PROPERTY,
+    PROPERTY_BID,
+	PROPERTY_DESC, 
+	REFDATA_SD, 
+	REFDATA_LD, 
+	SEQ, 
+	LONG_DESC, 
+	DATE_VALUES, 
+	BOOL_FLAGS;
+SELECT 
+	m.case_reference,
+    m.property,
+    m.property_bid,
+	m.property_desc,
+	m.refdata_sd,
+	m.refdata_ld,
+	m.seq,
+	m.long_desc,
+	m.date_values,
+	m.bool_flags
+FROM bi_cmg_dwh.dim_cec_multivalue m;
+
+
+// Temporary table for State of Play to derive the latest State of Play
+StateOfPlay_Temp:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   LONG_DESC 																			AS [State of Play],
+   DATE_VALUES																			AS [State of Play Date],
+   SEQ																					AS [State of Play Sequence]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY_DESC = 'State of play';
+
+	LEFT JOIN(StateOfPlay_Temp)
+      LOAD
+      	CASE_REFERENCE																	AS [Case Reference],
+      	MAX(SEQ)																		AS [State of Play Indicator]
+      RESIDENT Case_MultiValue_Temp
+      GROUP BY CASE_REFERENCE;
+
+// Dimension State of Play (n:1 Case)
+StateOfPlay:
+LOAD
+   [Case Reference]																		AS [Case Reference],
+   [State of Play] 																		AS [State of Play],
+   [State of Play Date]																	AS [State of Play Date],
+   If( [State of Play Sequence] = [State of Play Indicator], 'Yes', 'No' ) 				AS [Latest State of Play]
+Resident StateOfPlay_Temp;
+
+// Drop temporary table StateOfPlay_Temp
+DROP TABLE StateOfPlay_Temp;
+
+
+// Dimension Additional Member States (n:1 Case)
+AdditionalMS:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   RIGHT( PROPERTY_BID, 3 )																AS [Additional MS Code],   
+   REFDATA_LD																			AS [Additional MS],
+   SEQ												    								AS [Additional MS Sequence]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY_DESC = 'Additional Member States';
+
+// Dimension Sectors (n:1 Case)
+Sectors:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   REFDATA_SD 																			AS [Nace Code],
+   REFDATA_LD																			AS [Nace Description],
+   REFDATA_SD&' - '&REFDATA_LD                          								AS [Nace Code + Description],
+   SEQ												    								AS [Nace Sequence],
+   If( BOOL_FLAGS = 'True', 'Yes', 'No' )												AS [Nace Primary?]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY_DESC =  'Sector(s) covered';
+
+// Dimension Authority (n:1 Case)
+Authority:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   REFDATA_LD																			AS [Case Authority],
+   SEQ																					AS [Case Authority Sequence]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY_DESC =  'Authority';
+
+// Dimension Ex-officio origin (n:1 Case)
+EO_Origin:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   REFDATA_LD																			AS [EO Origin Country],
+   SEQ																					AS [EO Origin Sequence]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY_DESC =  'Ex-officio origin';
+
+// Dimension Geographical Scope (n:1 Case)
+GeoScope:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   REFDATA_LD																			AS [Geographical Scope],
+   SEQ																					AS [Geographical Scope Sequence]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY_DESC =  'Geographical scope';
+
+// Dimension International Cooperation Scope (n:1 Case)
+IntCooperationScope:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   RIGHT( PROPERTY_BID, 3 )																AS [IC Country Code],
+   REFDATA_LD																			AS [IC Country Name],
+   SEQ																					AS [IC Country Sequence]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY_DESC =  'International Cooperation';
+
+// Dimension Obligation Concerned (n:1 Case)
+ObligationConcerned:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   REFDATA_LD																			AS [Obligation Concerned],
+   SEQ																					AS [Obligation Concerned Sequence]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY_DESC =  'Obligation concerned';
+
+// Dimension Core Platform Services (n:1 Case)
+CorePlatformServices:
+LOAD
+   CASE_REFERENCE																		AS [Case Reference],
+   REFDATA_LD																			AS [Core Platform Service],
+   SEQ																					AS [Core Platform Service Sequence]
+RESIDENT Case_MultiValue_Temp
+WHERE PROPERTY = 'PT_CorePlatformServices' ;
+
+// Drop temporary table Case_MultiValue_Temp
+DROP TABLE Case_MultiValue_Temp;
+
+// Dimension Case Team (n:1 Case)
+Case_Team:
+LOAD 
+	CASE_REFERENCE																		AS [Case Reference],
+	USER_ROLE																			AS [User Role],
+    ApplyMap('MAP_Team_Role',USER_ROLE,'Unknown')    									AS [User Role Code],
+	USER_LOGIN																			AS [User Login], 
+	USER_FIRSTNAME																		AS [User First Name],
+	USER_NAME																			AS [User Last Name],
+    capitalize(USER_FIRSTNAME)&' '&capitalize(USER_NAME) 								AS [User Full Name],
+	USER_EMAIL																			AS [User Email],	 
+	START_DATE																			AS [User Start Date], 
+	END_DATE																			AS [User End Date],  
+	INSTRUCTIONS																		AS [User Instructions];
+SELECT 
+	t.case_reference,
+	t.user_role,
+	t.user_login,
+	t.user_firstname,
+	t.user_name,
+	t.user_email,
+	t.start_date,
+	t.end_date,
+	t.instructions
+FROM bi_cmg_dwh.dim_cec_caseteam t
+JOIN bi_cmg_dwh.dim_cec_case c
+   ON ( c.case_reference_id = t.case_reference_id )
+WHERE SYSDATE < NVL( t.end_date, TO_DATE('31/12/9998','dd/mm/yyyy') ) ;
+
+// Dimension Case Party (n:1 Case)
+Case_Party:
+Load
+    CASE_REFERENCE																		AS [Case Reference],
+    PT_ROLE_SD																			AS [Party Role],
+    PT_CONTACT_SD																		AS [Party Name];
+SELECT DISTINCT
+    c.case_reference,
+    d.pt_role_sd,
+    d.pt_contact_sd
+FROM bi_cmg_dwh.dim_cec_party d
+JOIN bi_cmg_dwh.dim_cec_case c
+   ON ( c.case_reference_id = d.case_reference_id )
+WHERE c.pt_instrument_sd = 'Digital Markets Act' 
+   AND c.case_reference LIKE 'DMA.%';
+
+
+// Dimension Case Decisions (n:1 Case)
+Case_Decisions:
+Load
+	CASE_REFERENCE 																		AS [Case Reference],
+    Date(Floor( DATE_OF_ADOPTION ))														AS [Decision Date],
+    DECISION_TYPE																		AS [Decision Type],
+	DECIDE_DEC_REF																		AS [Decide Reference],
+	DEC_DETAILS																			AS [Decision Details],
+	DEC_CONDITION																		AS [Decision Condition],
+ 	COMMENTS																			AS [Decision Comments], 
+	OJ_REF																				AS [Decision OJ Ref],
+	OJ_PAGE_NB																			AS [Decision OJ Nr],
+	Date(Floor( OJ_PUB_DATE))															AS [Decision OJ Publication Date], 
+ 	FORMAL_ADOPTION_BY																	AS [Formal Adoption By], 
+	IS_PUBLISHED																		AS [Is Dec. Published?], 
+	IS_FINALDECISION																	AS [Is Dec. Final?];
+SELECT DISTINCT
+	d.case_reference,
+	CAST( d.date_of_adoption AS DATE) AS date_of_adoption,
+	d.decision_type,
+    d.decide_dec_ref,
+	d.dec_details,
+	d.dec_condition,
+ 	NULL AS comments,
+ 	d.ms_ref_letter,
+	d.is_published,
+	d.oj_ref,
+ 	d.oj_page_nb,
+	CAST( d.oj_pub_date AS DATE)  AS oj_pub_date,
+ 	d.formal_adoption_by,
+	d.is_finaldecision
+FROM bi_cmg_dwh.dim_cec_decision d
+JOIN bi_cmg_dwh.dim_cec_case c
+   ON ( c.case_reference_id = d.case_reference_id );
+
+// Dimension Case Phase (n:1 Case)
+Case_Phase:
+LOAD 
+	CASE_REFERENCE 																		AS [Case Reference],
+	DATE( Floor( PHASE_START_DT ) )														AS [Phase Start Date], 
+	DATE( Floor( PHASE_END_DT ) )														AS [Phase End Date], 
+	PHASE_DURATION_DAYS																	AS [Phase Duration Days], 
+	PHASE_DURATION_MONTHS																AS [Phase Duration Months], 
+	PHASE_TRANS_REASON																	AS [Phase Transition Reason], 
+	DATE( Floor( FIRST_PHASE_START_DT  ) )												AS [First Phase Start Date],
+	FIRST_PHASE																			AS [First Phase Name],
+	IF( Not WildMatch(PHASE_NAME, 'Missing*'), PHASE_NAME )							    AS [Phase Name],
+    IF( Not WildMatch(PHASE_NAME, 'Missing*'), LAST_PHASE )								AS [Last Phase], 
+    DATE( Floor( LAST_PHASE_END_DT ))													AS [Last Phase End Date];
+SELECT 
+	case_reference_id,
+	case_reference,
+	cmacm_case_id,
+	CAST( phase_start_dt AS DATE) AS phase_start_dt,
+	CAST( phase_end_dt AS DATE) AS phase_end_dt,
+	phase_duration_days,
+	phase_duration_months,
+	phase_trans_reason,
+	legacyprocreference,
+	CAST( first_phase_start_dt AS DATE) AS first_phase_start_dt,
+	first_phase,
+	phase_name,
+    MAX( phase_name ) KEEP ( DENSE_RANK FIRST ORDER BY phase_start_dt DESC)  OVER ( PARTITION BY case_reference ) 					  AS last_phase,    
+    MAX( CAST( phase_start_dt AS DATE) ) KEEP ( DENSE_RANK FIRST ORDER BY phase_start_dt DESC)  OVER ( PARTITION BY case_reference )  AS last_phase_end_dt
+FROM bi_cmg_dwh.dim_cec_phase;
+
+
+// Dimension Case HT (1:1 Case)
+Case_HT:
+LOAD 
+	CASE_REFERENCE																		AS [Case Reference],
+    CMACM_CASE_ID																		AS [CMA Case Identifier],
+    PT_ISAPPEAL																			AS [Is Appeal?],		
+    PT_CASEINITIATEDBY_SD																AS [Case Initated By SD],
+	PT_CASETITLE																		AS [Case Title], 
+	PT_CASESTATUS_SD																	AS [Case Status], 
+    If(PT_CASESTATUS_SD = 'Open', rgb(0,111,180),
+        If(PT_CASESTATUS_SD = 'Closure Requested', rgb(242,149,39),
+        rgb(218,33,49)))																AS [Case Status Color],    
+	PT_CASETYPE_SD																		AS [Case Type], 
+	TRIM( PT_INSTRUMENT_SD )															AS [Instrument], 
+	DATE( PT_CREATIONDATE )																AS [Creation Date], 
+	PT_JUSTIFICATIONFORDELAY															AS [Justification for Delay], 
+	PT_LEGALBASIS_SD																	AS [Legal Basis], 
+	DATE( PT_DECIDEDDATE )																AS [Closure Activity Subst. Date],
+    If( Not IsNull([PT_DECIDEDDATE]), 'Yes', 'No' )								    	AS [Activity Subst. Closed?], 
+	PT_ISTOBEWEBPUBLISHED																AS [Is Web Published?], 
+	PT_SHORTDESCRIPTION																	AS [Case Description], 
+	If( PT_ISPROTECTED = 1, 'Yes', 'No' ) 	        									AS [Is Protected?], 
+	DATE( Floor( PT_INITIATIONDATE ) )													AS [Initiation Date], 
+	PT_PRIORITY_SD																		AS [Priority], 
+	DATE( PT_CLOSUREDATE )																AS [Closure Date], 
+    If( Not IsNull([PT_CLOSUREDATE]), 'Yes', 'No' )								    	AS [Closed?],     
+    DATE( PT_DECIDEDDATE )                              								AS [Decided Date],
+	PT_DIRECTORATEUNIT																	AS [Unit], 
+	PT_BUSINESSCASECATEGORY_SD															AS [Business Category], 
+	PT_BUSINESSCASETYPE_SD																AS [Business Case Type],
+    PT_CODENAME                                     									AS [Code Name],
+    '$(vCaseURL)' & CASE_REFERENCE 														AS [Case URL],    
+    If( PT_CASETYPE_SD = 'Horizontal Project', 'HP',
+    	If( PT_INSTRUMENT_SD = 'State Aid', 'SA',
+    	If( PT_INSTRUMENT_SD = 'Digital Markets Act', 'DMA',
+    	If( PT_INSTRUMENT_SD = 'Antitrust', 'AT',
+      	If( PT_INSTRUMENT_SD = 'Mergers', 'M',
+    	If( PT_INSTRUMENT_SD = 'Foreign Subsidies', 'FS')))))) 							AS [Case Domain],
+    If(PT_CASESTATUS_SD = 'Open', Floor(Today() - PT_INITIATIONDATE),
+    	Floor(PT_CLOSUREDATE - PT_INITIATIONDATE))										AS [Pending Duration],
+    PT_ECNCASECREATION_SD																AS [Case ECN Request];   
+SELECT 
+	case_reference,
+	pt_isappeal,
+	pt_caseinitiatedby_sd,    
+	pt_casetitle,
+	pt_casestatus_sd,
+	pt_casetype_sd,
+	pt_instrument_sd,
+	pt_ecncasecreation_sd,
+	pt_creationdate,
+	pt_iseeacase,
+	pt_justificationfordelay,
+	pt_legalbasis_sd,
+	pt_decideddate,
+	pt_istobewebpublished,
+	pt_shortdescription,
+	pt_isprotected,
+	pt_initiationdate,
+	pt_priority_sd,
+	case_reference,
+	pt_closuredate,
+	pt_directorateunit,
+	pt_codename,
+	pt_coirequired,
+	cmacm_case_id,
+	pt_businesscasecategory_sd,
+	pt_businesscasetype_sd
+FROM bi_cmg_dwh.dim_cec_case
+WHERE case_reference LIKE 'SA.%'
+	OR case_reference LIKE 'DMA.%'
+    OR case_reference LIKE 'HT.%';
+
+	// Add aggregated ALL State of Plays
+	LEFT JOIN (Case_HT)
+    Load Distinct
+        [Case Reference]																AS [Case Reference],
+        If( Not IsNull([Decision Date]), 'Yes', 'No' )								    AS [Is Adopted?]
+    Resident Case_Decisions;
+
+	// Add aggregated ALL Sector info
+    LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat([Nace Full Description], Chr(10),[Nace Sequence] ) 						AS [All Nace Codes & Description]
+    GROUP BY [Case Reference];
+    Load 
+        [Case Reference]																AS [Case Reference],
+        [Nace Sequence]																	AS [Nace Sequence],
+        [Nace Code] & ' - ' & [Nace Description] & 
+        	If( [Nace Primary?] = 'Yes', ' ('& 'P' & ')' ) 								AS [Nace Full Description]
+    Resident Sectors;
+
+	// Add aggregated ALL State of Plays
+	LEFT JOIN (Case_HT)
+    Load 
+        [Case Reference]																AS [Case Reference],
+        [State of Play]																	AS [State of Play (Latest)]
+    Resident StateOfPlay
+    WHERE [Latest State of Play] = 'Yes';
+
+	// Add aggregated Team Members Summary
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference]																	AS [Case Reference],
+       Concat([Team summary], Chr(10), 
+       	ApplyMap('MAP_Team_RoleSequence',[User Role Code],'Unknown') ) 					AS [Team summary]
+    GROUP BY [Case Reference];
+    Load 
+        [Case Reference]																AS [Case Reference],
+        [User Role Code]												 				AS [User Role Code],  
+        '(' & [User Role Code] & ') ' & CONCAT([User Full Name], ', ') 					AS [Team summary]
+    Resident Case_Team
+    GROUP BY 
+        [Case Reference],
+        [User Role Code];
+
+	// Add aggregated ALL Additional Member States
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat([Additional MS],', ',[Additional MS Sequence] ) 							AS [All Additional Member States]
+    Resident AdditionalMS
+    GROUP BY [Case Reference];
+    
+	// Add aggregated ALL Authorities
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat([Case Authority],', ',[Case Authority Sequence] ) 						AS [All Case Authorities]
+    Resident Authority
+    GROUP BY [Case Reference];
+
+	// Add aggregated ALL Ex Officio Origin Countries
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat([EO Origin Country],', ',[EO Origin Sequence] ) 							AS [All EO Origin Countries]
+    Resident EO_Origin
+    GROUP BY [Case Reference];
+
+	// Add aggregated ALL Geographical Scopes
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat([Geographical Scope],', ',[Geographical Scope Sequence] ) 	 			AS [All Geographical Scope Countries]
+    Resident GeoScope
+    GROUP BY [Case Reference];
+
+	// Add aggregated ALL Internation Cooperation Scopes
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat([IC Country Name],', ',[IC Country Sequence] ) 	 	 					AS [All IC Countries]
+    Resident IntCooperationScope
+    GROUP BY [Case Reference];
+
+	// Add aggregated ALL Obligation Concerned
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat([Obligation Concerned],', ',[Obligation Concerned Sequence] )   			AS [All Obligations Concerned]
+    Resident ObligationConcerned
+    GROUP BY [Case Reference];
+
+	// Add aggregated ALL Core Platform Services
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat([Core Platform Service],', ',[Core Platform Service Sequence] )   		AS [All Core Platform Services]
+    Resident CorePlatformServices
+    GROUP BY [Case Reference];
+    
+	// Add aggregated ALL Case Parties
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat(If(Not(IsNull([Party Name])),
+       	   [Party Name] & ' (' & [Party Role] & ')'), Chr(10))							AS [All Core Party Names]
+    Resident Case_Party
+    GROUP BY [Case Reference];    
+
+	// Add aggregated ALL Decision Types
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat(If(Not(IsNull([Decision Date])),
+       	   [Decision Type] & ' (' & [Decision Date] & ')'), Chr(10))			 		AS [All Decisions Types]
+    Resident Case_Decisions
+    GROUP BY [Case Reference];    
+
+	// Add aggregated ALL Decision Types
+	LEFT JOIN (Case_HT)
+    LOAD
+       [Case Reference],
+       Concat(If(Not(IsNull([Decision Date])),
+       	   [Decision Type] & ' (' & [Decision Date] & ')'), Chr(10))			 		AS [All Decisions Types]
+    Resident Case_Decisions
+    GROUP BY [Case Reference];    
+
+
+
+
+
+
+
+
+
+
+
+
+
+///$tab Master Calendar
+// Preparation steps for building Time Dimension
+MinMaxTable:
+LOAD 
+   MonthEnd(Today())+1                  												        AS [MaxCreationDate],
+   MIN( [Initiation Date] )  		 															AS [MinCreationDate]
+RESIDENT Case_HT;
+
+LET vMax= NUM(PEEK('MaxCreationDate',0,MinMaxTable));
+LET vMin= NUM(PEEK('MinCreationDate',0,MinMaxTable));
+
+DROP TABLE MinMaxTable;
+
+// Generate dates between minimum Submission date and sysdate + 3 next months
+TemCal:
+LOAD
+   DATE($(vMin) + Iterno()-1)    																AS [Date]
+AUTOGENERATE 1 WHILE $(vMin) + Iterno() <= $(vMax);
+
+// Load Main Time Dimension table
+Time_Dim:
+LOAD
+  [Date]		   																				AS [Date],
+  Year( [Date] )  																				AS [Year],
+  num(year([Date]),'0000')&'-'&num(month([Date]),'00')                                        	AS [Yearmonth],
+  Month([Date]) 																				AS [Month] 
+RESIDENT TemCal;
+
+DROP TABLE TemCal;
+
+NoConcatenate
+
+// Create variant Time dim for Creation Date
+Dim_CreationDate:
+LOAD
+  [Date]             																			AS [Initiation Date],  
+  [Year]             																			AS [Initiation Year],
+  [Yearmonth]        																			AS [Initiation Yearmonth],
+  [Month] 																						AS [Initiation Month],
+  if( [Date] >= AddMonths(Today(),-12) AND [Date] <= Today(),Yearmonth )	 					AS [Last 12 Months],
+  if( [Date] >= AddMonths(Today(),-24) AND [Date] <= Today(),Yearmonth )						AS [Last 24 Months],  
+  if( [Date] >= AddMonths(Today(),-36) AND [Date] <= Today(),Yearmonth )						AS [Last 3 Years],
+  if( [Date] >= AddMonths(Today(),-60) AND [Date] <= Today(),Yearmonth )						AS [Last 5 Years]
+RESIDENT Time_Dim;
+
+DROP TABLE Time_Dim;
+
+
+
